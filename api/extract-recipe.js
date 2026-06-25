@@ -6,20 +6,29 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { contents, systemInstruction } = req.body;
-  if (!contents) return res.status(400).json({ error: "Missing contents" });
+  const { system, userContent, hasImage } = req.body;
+  if (!userContent) return res.status(400).json({ error: "Missing userContent" });
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents,
-        systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
-      }),
-    }
-  );
+  // Use a vision-capable model when an image is included, text model otherwise
+  const model = hasImage
+    ? "meta-llama/llama-4-scout-17b-16e-instruct"
+    : "llama-3.3-70b-versatile";
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userContent },
+      ],
+      max_tokens: 2000,
+    }),
+  });
 
   const data = await response.json();
   return res.status(response.ok ? 200 : 500).json(data);
