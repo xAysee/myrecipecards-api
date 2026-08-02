@@ -1,27 +1,26 @@
-import { createClient } from "@supabase/supabase-js";
-
 export default async function handler(req, res) {
-  const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY
-  );
-
-  // Query a built-in Postgres system view -- no RLS, no grants needed
-  const { data, error } = await supabase.rpc("version");
-
-  if (error) {
-    // Fallback: try a simple SQL query via the REST API
-    const { error: error2 } = await supabase
-      .from("auth_bridge")
-      .select("email")
-      .limit(1);
-
-    if (error2) {
-      console.error("Ping failed:", error2);
-      return res.status(500).json({ ok: false, error: error2.message });
+  // Use direct REST API call instead of the JS client
+  // This bypasses any client library issues
+  const url = `${process.env.SUPABASE_URL}/rest/v1/auth_bridge?select=email&limit=1`;
+  
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "apikey": process.env.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    });
+    
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error("Ping REST error:", resp.status, text);
+      return res.status(500).json({ ok: false, status: resp.status, error: text });
     }
-  }
 
-  console.log("Supabase pinged successfully at", new Date().toISOString());
-  return res.status(200).json({ ok: true, time: new Date().toISOString() });
+    console.log("Supabase pinged successfully at", new Date().toISOString());
+    return res.status(200).json({ ok: true, time: new Date().toISOString() });
+  } catch(e) {
+    console.error("Ping fetch error:", e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
 }
