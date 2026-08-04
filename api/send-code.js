@@ -20,16 +20,23 @@ function hashCode(code) {
 async function sendEmail(to, name, code) {
   const resp = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "origin": "https://myrecipecards.vercel.app",
+    },
     body: JSON.stringify({
       service_id: process.env.EMAILJS_SERVICE_ID,
       template_id: process.env.EMAILJS_TEMPLATE_ID,
       user_id: process.env.EMAILJS_PUBLIC_KEY,
-      accessToken: process.env.EMAILJS_PRIVATE_KEY,  // ← add this line
+      accessToken: process.env.EMAILJS_PRIVATE_KEY,
       template_params: { to_email: to, to_name: name || to, code },
     }),
   });
-  if (!resp.ok) throw new Error(await resp.text());
+  if (!resp.ok) {
+    const text = await resp.text();
+    console.error("EmailJS response:", resp.status, text);
+    throw new Error(text);
+  }
 }
 
 export default async function handler(req, res) {
