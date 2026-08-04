@@ -1,12 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
-console.log("EmailJS keys present:", {
-  service: !!process.env.EMAILJS_SERVICE_ID,
-  template: !!process.env.EMAILJS_TEMPLATE_ID,
-  public: !!process.env.EMAILJS_PUBLIC_KEY,
-  private: !!process.env.EMAILJS_PRIVATE_KEY,
-});
+console.error("EmailJS response:", resp.status, text);
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
