@@ -1,8 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
-console.error("EmailJS response:", resp.status, text);
-
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -44,7 +42,6 @@ export default async function handler(req, res) {
   const { email, name, mode } = req.body;
   if (!email) return res.status(400).json({ error: "Missing email" });
 
-  // Check if account exists
   const { data: existingUser } = await supabase
     .from("users").select("id").eq("email", email).maybeSingle();
 
@@ -58,28 +55,27 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Please enter your name." });
   }
 
-  // Generate a 6-digit code, hash it, store with expiry
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const hashed = hashCode(code);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-
   const password = crypto.randomBytes(32).toString("hex") + "Aa1!";
 
   const { error: upsertErr } = await supabase.from("auth_bridge").upsert({
     email,
     current_password: password,
-    pending_code: hashed,          // store the HASH, never the raw code
+    pending_code: hashed,
     pending_code_expires_at: expiresAt,
     pending_signup_name: name?.trim() || null,
     is_new_signup: mode === "signup",
   });
+
   if (upsertErr) {
     console.error("upsert error:", upsertErr);
     return res.status(500).json({ error: "Failed to store verification code." });
   }
 
   try {
-    await sendEmail(email, name, code);  // send the RAW code by email
+    await sendEmail(email, name, code);
   } catch(e) {
     console.error("Email error:", e);
     return res.status(500).json({ error: "Failed to send email. Please try again." });
