@@ -46,45 +46,52 @@ export default async function handler(req, res) {
   if (!email) return res.status(400).json({ error: "Missing email" });
 
   const key = email.trim().toLowerCase();
+  const now = Date.now();
 
-  // ── Rate limiting ─────────────────────────────────────────────────────────
+  // ── Fetch existing bridge row ──────────────────────────────────────────────
   const { data: existing } = await supabase
     .from("auth_bridge")
     .select("attempt_count, attempt_window_start")
     .eq("email", key)
     .maybeSingle();
 
-  const now = Date.now();
+  // ── Rate limit check ───────────────────────────────────────────────────────
+  const windowStart = existing?.attempt_window_start
+    ? new Date(existing.attempt_window_start).getTime()
+    : null;
+  const windowActive = windowStart && (now - windowStart) < COOLDOWN_MS;
 
-  if (existing) {
-    const windowStart = existing.attempt_window_start
-      ? new Date(existing.attempt_window_start).getTime()
-      : null;
-    const windowActive = windowStart && (now - windowStart) < COOLDOWN_MS;
-
-    if (windowActive && existing.attempt_count >= MAX_ATTEMPTS) {
-      const retryAfterMs = COOLDOWN_MS - (now - windowStart);
-      const retryMins = Math.ceil(retryAfterMs / 60000);
-      return res.status(429).json({
-        error: `Too many attempts. Please wait ${retryMins} minute${retryMins !== 1 ? "s" : ""} before trying again.`,
-      });
-    }
-
-    // Reset window if it expired
-    if (!windowActive) {
-      await supabase.from("auth_bridge").update({
-        attempt_count: 1,
-        attempt_window_start: new Date(now).toISOString(),
-      }).eq("email", key);
-    } else {
-      // Increment within active window
-      await supabase.from("auth_bridge").update({
-        attempt_count: existing.attempt_count + 1,
-      }).eq("email", key);
-    }
+  if (windowActive && (existing?.attempt_count || 0) >= MAX_ATTEMPTS) {
+    const retryAfterMs = COOLDOWN_MS - (now - windowStart);
+    const retryMins = Math.ceil(retryAfterMs / 60000);
+    return res.status(429).json({
+      error: `Too many attempts. Please wait ${retryMins} minute${retryMins !== 1 ? "s" : ""} before trying again.`,
+    });
   }
 
-  // ── Account existence check ───────────────────────────────────────────────
+  // ── Increment attempt counter BEFORE checking account existence ────────────
+  // This ensures probing for valid emails also hits the rate limit
+  if (existing && windowActive) {
+    await supabase.from("auth_bridge").update({
+      attempt_count: existing.attempt_count + 1,
+    }).eq("email", key);
+  } else if (!existing) {
+    // First ever request for this email — create the rate limit row
+    await supabase.from("auth_bridge").upsert({
+      email: key,
+      current_password: "placeholder",
+      attempt_count: 1,
+      attempt_window_start: new Date(now).toISOString(),
+    });
+  } else {
+    // Window expired — reset
+    await supabase.from("auth_bridge").update({
+      attempt_count: 1,
+      attempt_window_start: new Date(now).toISOString(),
+    }).eq("email", key);
+  }
+
+  // ── Account existence check (after incrementing) ───────────────────────────
   const { data: existingUser } = await supabase
     .from("users").select("id").eq("email", key).maybeSingle();
 
@@ -104,22 +111,15 @@ export default async function handler(req, res) {
   const expiresAt = new Date(now + 10 * 60 * 1000).toISOString();
   const password = crypto.randomBytes(32).toString("hex") + "Aa1!";
 
-  const upsertData = {
+  const { error: upsertErr } = await supabase.from("auth_bridge").upsert({
     email: key,
     current_password: password,
     pending_code: hashed,
     pending_code_expires_at: expiresAt,
     pending_signup_name: name?.trim() || null,
     is_new_signup: mode === "signup",
-  };
+  });
 
-  // Set window start if this is the first request
-  if (!existing) {
-    upsertData.attempt_count = 1;
-    upsertData.attempt_window_start = new Date(now).toISOString();
-  }
-
-  const { error: upsertErr } = await supabase.from("auth_bridge").upsert(upsertData);
   if (upsertErr) {
     console.error("upsert error:", upsertErr);
     return res.status(500).json({ error: "Failed to store verification code." });
