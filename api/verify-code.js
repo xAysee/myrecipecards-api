@@ -7,7 +7,7 @@ const supabase = createClient(
 );
 
 const MAX_ATTEMPTS = 5;
-const COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+const COOLDOWN_MS = 15 * 60 * 1000;
 
 function hashCode(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
@@ -58,7 +58,6 @@ export default async function handler(req, res) {
 
   const submittedHash = hashCode(code.trim());
   if (submittedHash !== bridge.pending_code) {
-    // Increment attempt count on wrong code
     await supabase.from("auth_bridge").update({
       attempt_count: (bridge.attempt_count || 0) + 1,
       attempt_window_start: windowActive
@@ -89,14 +88,12 @@ export default async function handler(req, res) {
     } else {
       authUser = data.user;
     }
-    // Ensure user row exists in public.users
     await supabase.from("users").upsert({
       id: authUser.id,
       email: key,
       name: bridge.pending_signup_name || key.split("@")[0],
     });
   } else {
-    // Login: reset password to our generated one then use it
     const { data: listData } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
     const existing = listData?.users?.find(u => u.email === key);
     if (!existing) return res.status(404).json({ error: "Account not found." });
@@ -106,20 +103,24 @@ export default async function handler(req, res) {
     authUser = existing;
   }
 
-  // ── Generate a magic link for the client to establish a session ────────────
-  const { data: sessionData, error: sessionErr } = await supabase.auth.admin.generateLink({
-    type: "magiclink",
+  // ── Create session directly — NO magic link, tokens returned over HTTPS only
+  // signInWithPassword from the admin client establishes a real session
+  // without ever putting tokens in a URL fragment
+  const anonSupabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_ANON_KEY
+  );
+  const { data: signInData, error: signInErr } = await anonSupabase.auth.signInWithPassword({
     email: key,
-    options: {
-      redirectTo: req.headers.origin || "https://myrecipecards.vercel.app",
-    },
+    password: bridge.current_password,
   });
-  if (sessionErr) {
-    console.error("generateLink error:", sessionErr);
-    return res.status(500).json({ error: "Verification succeeded but session creation failed." });
+
+  if (signInErr) {
+    console.error("signIn error:", signInErr);
+    return res.status(500).json({ error: "Verification succeeded but session creation failed. Please try logging in." });
   }
 
-  // ── Clear the used code + reset rate limit on success ─────────────────────
+  // ── Clear used code + reset rate limit ────────────────────────────────────
   await supabase.from("auth_bridge").update({
     pending_code: null,
     pending_code_expires_at: null,
@@ -128,8 +129,16 @@ export default async function handler(req, res) {
     attempt_window_start: null,
   }).eq("email", key);
 
+  // Return session tokens directly over HTTPS — never in a URL fragment
   return res.status(200).json({
     ok: true,
-    link: sessionData.properties?.action_link,
+    access_token: signInData.session.access_token,
+    refresh_token: signInData.session.refresh_token,
+    expires_at: signInData.session.expires_at,
+    user: {
+      id: signInData.user.id,
+      email: signInData.user.email,
+      name: signInData.user.user_metadata?.name || signInData.user.email.split("@")[0],
+    },
   });
 }
