@@ -8,9 +8,41 @@ const supabase = createClient(
 
 const MAX_ATTEMPTS = 5;
 const COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+const IP_MAX = 10;                   // max requests per IP per window
+const IP_COOLDOWN_MS = 15 * 60 * 1000;
 
 function hashCode(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
+}
+
+// In-memory IP rate limit store (resets on cold start, good enough for serverless)
+// For persistent IP limiting across instances, move this to a Redis/Upstash store
+const ipStore = new Map();
+
+function getClientIp(req) {
+  // Vercel sets x-forwarded-for; take the first (original client) IP
+  const forwarded = req.headers["x-forwarded-for"];
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return req.socket?.remoteAddress || "unknown";
+}
+
+function checkIpLimit(ip) {
+  const now = Date.now();
+  const entry = ipStore.get(ip);
+
+  if (!entry || (now - entry.windowStart) >= IP_COOLDOWN_MS) {
+    // No entry or window expired — start fresh
+    ipStore.set(ip, { count: 1, windowStart: now });
+    return { allowed: true };
+  }
+
+  if (entry.count >= IP_MAX) {
+    const retryMins = Math.ceil((IP_COOLDOWN_MS - (now - entry.windowStart)) / 60000);
+    return { allowed: false, retryMins };
+  }
+
+  entry.count += 1;
+  return { allowed: true };
 }
 
 async function sendEmail(to, name, code) {
@@ -43,19 +75,39 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { email, name, mode } = req.body;
+
+  // ── Strict mode allowlist ──────────────────────────────────────────────────
+  if (mode !== "login" && mode !== "signup") {
+    return res.status(400).json({ error: "Invalid mode." });
+  }
+
   if (!email) return res.status(400).json({ error: "Missing email" });
+
+  // Basic email format check server-side
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: "Invalid email address." });
+  }
 
   const key = email.trim().toLowerCase();
   const now = Date.now();
 
-  // ── Fetch existing bridge row ──────────────────────────────────────────────
+  // ── Per-IP rate limit ──────────────────────────────────────────────────────
+  const ip = getClientIp(req);
+  const ipCheck = checkIpLimit(ip);
+  if (!ipCheck.allowed) {
+    console.warn(`IP rate limit hit: ${ip}`);
+    return res.status(429).json({
+      error: `Too many requests from your network. Please wait ${ipCheck.retryMins} minute${ipCheck.retryMins !== 1 ? "s" : ""} before trying again.`,
+    });
+  }
+
+  // ── Per-email rate limit ───────────────────────────────────────────────────
   const { data: existing } = await supabase
     .from("auth_bridge")
     .select("attempt_count, attempt_window_start")
     .eq("email", key)
     .maybeSingle();
 
-  // ── Rate limit check ───────────────────────────────────────────────────────
   const windowStart = existing?.attempt_window_start
     ? new Date(existing.attempt_window_start).getTime()
     : null;
@@ -65,18 +117,16 @@ export default async function handler(req, res) {
     const retryAfterMs = COOLDOWN_MS - (now - windowStart);
     const retryMins = Math.ceil(retryAfterMs / 60000);
     return res.status(429).json({
-      error: `Too many attempts. Please wait ${retryMins} minute${retryMins !== 1 ? "s" : ""} before trying again.`,
+      error: `Too many attempts for this email. Please wait ${retryMins} minute${retryMins !== 1 ? "s" : ""} before trying again.`,
     });
   }
 
-  // ── Increment attempt counter BEFORE checking account existence ────────────
-  // This ensures probing for valid emails also hits the rate limit
+  // ── Increment per-email counter BEFORE account existence check ────────────
   if (existing && windowActive) {
     await supabase.from("auth_bridge").update({
       attempt_count: existing.attempt_count + 1,
     }).eq("email", key);
   } else if (!existing) {
-    // First ever request for this email — create the rate limit row
     await supabase.from("auth_bridge").upsert({
       email: key,
       current_password: "placeholder",
@@ -84,14 +134,13 @@ export default async function handler(req, res) {
       attempt_window_start: new Date(now).toISOString(),
     });
   } else {
-    // Window expired — reset
     await supabase.from("auth_bridge").update({
       attempt_count: 1,
       attempt_window_start: new Date(now).toISOString(),
     }).eq("email", key);
   }
 
-  // ── Account existence check (after incrementing) ───────────────────────────
+  // ── Account existence check ────────────────────────────────────────────────
   const { data: existingUser } = await supabase
     .from("users").select("id").eq("email", key).maybeSingle();
 
