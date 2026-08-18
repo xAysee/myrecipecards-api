@@ -1,35 +1,117 @@
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// System prompt lives entirely on the server — never sent from or exposed to the client
+const SYSTEM_PROMPT = `You are a recipe extraction assistant. Extract the recipe from the provided content and return ONLY valid JSON with this exact structure, no other text, no markdown, no backticks:
+{
+  "title": "Recipe Title",
+  "description": "Brief description",
+  "prepTime": "X mins",
+  "cookTime": "X mins",
+  "servings": 4,
+  "tags": ["tag1", "tag2"],
+  "notes": "Any additional notes",
+  "imageUrl": "https://... (only if a real image URL is found in the content)",
+  "ingredients": [
+    { "amount": "1", "unit": "cup", "name": "ingredient name" }
+  ],
+  "steps": [
+    "Step 1 description",
+    "Step 2 description"
+  ]
+}
+Rules:
+- Return ONLY the JSON object, nothing else
+- If you cannot find a clear recipe, return { "error": "No recipe found" }
+- Do not invent ingredients or steps not present in the source
+- Normalize amounts to numbers or simple fractions (1/2, 1/4 etc)
+- Tags should be lowercase, descriptive (cuisine type, meal type, dietary info, cooking method)`;
+
+async function verifyJwt(req) {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+  const token = authHeader.slice(7);
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data?.user) return null;
+  return data.user;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { system, userContent, hasImage } = req.body;
+  // ── Require valid Supabase JWT ─────────────────────────────────────────────
+  const user = await verifyJwt(req);
+  if (!user) {
+    return res.status(401).json({ error: "Unauthorized. A valid session is required." });
+  }
+
+  const { userContent, hasImage } = req.body;
   if (!userContent) return res.status(400).json({ error: "Missing userContent" });
 
-  // Use a vision-capable model when an image is included, text model otherwise
-  const model = hasImage
-    ? "meta-llama/llama-4-scout-17b-16e-instruct"
-    : "llama-3.3-70b-versatile";
+  // Validate userContent is a string or array (image+text) — reject anything else
+  if (typeof userContent !== "string" && !Array.isArray(userContent)) {
+    return res.status(400).json({ error: "Invalid userContent format." });
+  }
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: userContent },
-      ],
-      max_tokens: 2000,
-    }),
-  });
+  // ── Forward to Groq with server-side system prompt ─────────────────────────
+  try {
+    const groqResp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
+        max_tokens: 2048,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent },
+        ],
+      }),
+    });
 
-  const data = await response.json();
-  return res.status(response.ok ? 200 : 500).json(data);
+    if (!groqResp.ok) {
+      const errText = await groqResp.text();
+      console.error("Groq error:", groqResp.status, errText);
+      return res.status(502).json({ error: "Recipe extraction service unavailable. Please try again." });
+    }
+
+    const groqData = await groqResp.json();
+    const raw = groqData.choices?.[0]?.message?.content || "";
+
+    // ── Parse and validate the JSON before returning ──────────────────────────
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("No JSON in Groq response:", raw);
+      return res.status(422).json({ error: "Could not extract a recipe from that content. Try pasting the recipe text directly." });
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch(e) {
+      console.error("JSON parse error:", e, raw);
+      return res.status(422).json({ error: "Recipe extraction produced invalid data. Please try again." });
+    }
+
+    if (parsed.error) {
+      return res.status(422).json({ error: parsed.error });
+    }
+
+    // Return only the parsed recipe object — never the raw Groq response
+    return res.status(200).json({ recipe: parsed });
+
+  } catch(e) {
+    console.error("Extract error:", e);
+    return res.status(500).json({ error: "Recipe extraction failed. Please try again." });
+  }
 }
