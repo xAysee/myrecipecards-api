@@ -56,7 +56,6 @@ export default async function handler(req, res) {
   const { userContent, hasImage } = req.body;
   if (!userContent) return res.status(400).json({ error: "Missing userContent" });
 
-  // Validate userContent is a string or array (image+text) — reject anything else
   if (typeof userContent !== "string" && !Array.isArray(userContent)) {
     return res.status(400).json({ error: "Invalid userContent format." });
   }
@@ -82,6 +81,26 @@ export default async function handler(req, res) {
     if (!groqResp.ok) {
       const errText = await groqResp.text();
       console.error("Groq error:", groqResp.status, errText);
+
+      // Parse retry-after from Groq's rate limit response
+      if (groqResp.status === 429) {
+        try {
+          const errJson = JSON.parse(errText);
+          const msg = errJson?.error?.message || "";
+          const secondsMatch = msg.match(/try again in ([\d.]+)s/i);
+          const seconds = secondsMatch ? Math.ceil(parseFloat(secondsMatch[1])) : null;
+          return res.status(429).json({
+            error: seconds
+              ? `You're importing too quickly. Please wait ${seconds} second${seconds !== 1 ? "s" : ""} and try again.`
+              : "You're importing too quickly. Please wait a few seconds and try again.",
+          });
+        } catch(e) {
+          return res.status(429).json({
+            error: "You're importing too quickly. Please wait a few seconds and try again.",
+          });
+        }
+      }
+
       return res.status(502).json({ error: "Recipe extraction service unavailable. Please try again." });
     }
 
