@@ -1,6 +1,14 @@
+import { createClient } from "@supabase/supabase-js";
+import { handleCors } from "../_cors.js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
 export default async function handler(req, res) {
-  // Use direct REST API call instead of the JS client
-  // This bypasses any client library issues
+  if (handleCors(req, res)) return;
+
   const url = `${process.env.SUPABASE_URL}/rest/v1/auth_bridge?select=email&limit=1`;
   
   try {
