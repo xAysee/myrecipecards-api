@@ -132,7 +132,24 @@ export default async function handler(req, res) {
     }
 
     // Return only the parsed recipe object — never the raw Groq response
-    return res.status(200).json({ recipe: parsed });
+    // Sanitize — only return expected fields, cap string lengths
+    const sanitized = {
+      title: String(parsed.title || "Untitled").slice(0, 200),
+      description: String(parsed.description || "").slice(0, 1000),
+      prepTime: String(parsed.prepTime || "").slice(0, 50),
+      cookTime: String(parsed.cookTime || "").slice(0, 50),
+      servings: Math.min(Math.max(parseInt(parsed.servings) || 4, 1), 100),
+      tags: (Array.isArray(parsed.tags) ? parsed.tags : []).slice(0, 20).map(t => String(t).slice(0, 50)),
+      notes: String(parsed.notes || "").slice(0, 2000),
+      imageUrl: typeof parsed.imageUrl === "string" && parsed.imageUrl.startsWith("http") ? parsed.imageUrl.slice(0, 500) : null,
+      ingredients: (Array.isArray(parsed.ingredients) ? parsed.ingredients : []).slice(0, 100).map(i => ({
+        amount: String(i.amount || "").slice(0, 50),
+        name: String(i.name || "").slice(0, 200),
+      })),
+      steps: (Array.isArray(parsed.steps) ? parsed.steps : []).slice(0, 100).map(s => String(s).slice(0, 1000)),
+    };
+
+    return res.status(200).json({ recipe: sanitized });
 
   } catch(e) {
     console.error("Extract error:", e);
