@@ -55,17 +55,14 @@ export default async function handler(req, res) {
   const { userContent, hasImage } = req.body;
   if (!userContent) return res.status(400).json({ error: "Missing userContent" });
 
-  // Limit payload size to prevent abuse
-  const MAX_CONTENT_LENGTH = 50000; // 50KB of text is plenty for any recipe
-  const contentStr = typeof userContent === "string" 
-    ? userContent 
-    : JSON.stringify(userContent);
-  if (contentStr.length > MAX_CONTENT_LENGTH) {
-    return res.status(413).json({ error: "Content too large. Please paste a shorter excerpt." });
-  }
-  
   if (typeof userContent !== "string" && !Array.isArray(userContent)) {
     return res.status(400).json({ error: "Invalid userContent format." });
+  }
+
+  // Limit payload size to prevent abuse
+  const contentStr = typeof userContent === "string" ? userContent : JSON.stringify(userContent);
+  if (contentStr.length > 50000) {
+    return res.status(413).json({ error: "Content too large. Please paste a shorter excerpt." });
   }
 
   // ── Forward to Groq with server-side system prompt ─────────────────────────
