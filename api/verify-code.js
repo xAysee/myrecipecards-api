@@ -99,6 +99,8 @@ export default async function handler(req, res) {
     await supabase.auth.admin.updateUserById(existing.id, {
       password: bridge.current_password,
     });
+    // Invalidate all existing sessions on other devices so old sessions can't persist
+    await supabase.auth.admin.signOut(existing.id, "others");
     authUser = existing;
   }
 
